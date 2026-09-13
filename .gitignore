@@ -1,0 +1,17 @@
+# data — download from Kaggle, never commit
+data/
+*.csv
+*.zip
+*.parquet
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# editors / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
