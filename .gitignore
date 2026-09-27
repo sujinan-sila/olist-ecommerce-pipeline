@@ -4,11 +4,18 @@ data/
 *.zip
 *.parquet
 
+# credentials — never commit
+*.json
+.env
+kaggle.json
+
 # python
 __pycache__/
 *.pyc
 .venv/
-.env
+
+# notebooks
+.ipynb_checkpoints/
 
 # editors / os
 .vscode/
