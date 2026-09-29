@@ -2,7 +2,7 @@
 
 Batch pipeline over the [Olist Brazilian e-commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) — 9 related CSVs, ~1.4M rows — built with PySpark on a Google Cloud Dataproc cluster using a bronze / silver / gold layout on HDFS and Hive.
 
-> **Status: in progress.** Ingestion, exploration and cleaning are done. Integration, optimization and the serving layer are next — see [Progress](#progress).
+> **Status: in progress.** Ingestion through integration are done — seven gold tables are built. Optimization and the serving layer are next; see [Progress](#progress).
 
 ## Architecture
 
@@ -48,12 +48,18 @@ erDiagram
 | `01_ingestion` | CSV on HDFS | Loads 9 datasets, asserts row counts against the source | `bronze_*` |
 | `02_exploration` | `bronze_*` | Null and duplicate profiling, business EDA, delivery-time analysis | nothing |
 | `03_cleaning` | `bronze_*` | Null handling, type fixes, outlier trimming, geolocation collapse, feature engineering | `silver_*` |
-| `04_integration` | `silver_*` | Joins all 8 datasets, aggregations, window functions, enrichment | `gold_*` |
+| `04_integration` | `silver_*` | Pre-aggregates payments and reviews, joins all 8 datasets, aggregations, window functions, enrichment | `gold_*` |
 | `05_optimization_serving` | `gold_*` | Executor tuning, join-strategy benchmarks, bucketing, export | Parquet / GCS |
 
 ## Data quality findings
 
-The checks in notebooks 01 and 02 caught three problems that produce **wrong numbers without raising an error** — the dangerous kind.
+Every one of these produces **wrong numbers without raising an error** — the dangerous kind. Each was caught by comparing a row count or a total against something it should have matched, which is why those checks are built into the notebooks rather than done once by hand.
+
+**Joining `payments` inflated revenue by about 5%.** `payments` holds 103,886 rows for 99,440 distinct orders, because an order can be split across a card and a voucher. Joined onto a table already at item grain, every item in such an order is duplicated once per payment method, and `sum(price)` then counts the same item twice. The fact table came out at 115,864 rows against 110,337 items. Pre-aggregated `payments` and `reviews` to one row per order before joining, and added an assertion that the joined table matches the item count exactly.
+
+**Retention analysis returned a lifespan of zero for every customer.** The dataset carries both `customer_id`, which is issued fresh for each order, and `customer_unique_id`, which identifies the person. Grouping on `customer_id` puts exactly one order in each group, so first and last order dates are always the same date. Switched to `customer_unique_id`: 99,441 orders resolve to 93,642 people, and the top customer turns out to have ordered 16 times over 462 days.
+
+**Order counts were counting items.** With the fact table at one row per product per order, `count("order_id")` returns the number of items, not orders — one customer appeared to have placed 63 orders when they had placed one order for 63 items. `countDistinct` throughout, and average order value computed as total spend over distinct orders rather than as a mean of item prices.
 
 **`order_reviews` parsed 4,938 rows too many.** Spark read 104,162 rows against a documented 99,224. Review comments are free text containing newlines inside quoted fields, so the default CSV reader split single reviews across multiple rows. Left alone, every seller's average review score would have been wrong downstream. Fixed with `multiLine` and `escape`, and notebook 01 now asserts row counts against expected values so the pipeline stops rather than propagating bad data.
 
@@ -72,6 +78,22 @@ The checks in notebooks 01 and 02 caught three problems that produce **wrong num
 **`median` over `mean` for imputing payment values.** Payment amounts have a long right tail; the mean sits well above anything a typical customer pays.
 
 **Every layer mirrored to Cloud Storage.** HDFS lives on the cluster's disks and dies with it. Writing each layer to `gs://` as well means the cluster can be stopped or deleted between sessions — which is what keeps the bill near zero.
+
+**Row-count assertions between stages, not just at ingestion.** Three of the five findings above were silent inflations that a schema check would have passed. Ingestion asserts each dataset against its documented size; integration asserts that the joined fact table still matches the item count. Both stop the run rather than writing bad data forward.
+
+## Gold tables
+
+| Table | Rows | Grain |
+|---|---|---|
+| `gold_full_orders` | 110,337 | one row per product per order |
+| `gold_customer_spending` | 93,642 | one row per person |
+| `gold_customer_retention` | 93,642 | one row per person |
+| `gold_product_metrics` | 31,931 | one row per product |
+| `gold_seller_performance` | 3,028 | one row per seller |
+| `gold_top_products_per_seller` | 16,631 | top 5 by price per seller, ties included |
+| `gold_monthly_trend` | 24 | one row per month |
+
+`full_orders` matching the 110,337 items exactly is the check that the join fan-out is gone. The two customer tables agreeing at 93,642 confirms both group on the person rather than the order.
 
 ## Reproducing
 
@@ -120,7 +142,7 @@ PySpark 3.5 · Hadoop 3.3 (HDFS, YARN) · Hive metastore · Parquet · Google Cl
 - [x] Ingestion of all 9 datasets with row-count assertions
 - [x] Null and duplicate profiling, business EDA, delivery-time distribution
 - [x] Cleaning: nulls, types, outliers, geolocation collapse, feature engineering
-- [ ] Integration: 8-way join, aggregations, window functions, enrichment
+- [x] Integration: 8-way join, aggregations, window functions, enrichment
 - [ ] Optimization: executor tuning, join benchmarks, bucketing
 - [ ] Serving: partitioned Parquet, BigQuery load, Looker Studio dashboard
 - [x] Docs: data dictionary and ERD
