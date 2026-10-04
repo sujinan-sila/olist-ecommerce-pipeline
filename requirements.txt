@@ -1,0 +1,5 @@
+# Versions on Dataproc image 2.2. The notebooks run on the cluster;
+# these are only needed to open or lint them locally.
+pyspark==3.5.3
+pandas
+matplotlib

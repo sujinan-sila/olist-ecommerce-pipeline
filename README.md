@@ -2,7 +2,7 @@
 
 Batch pipeline over the [Olist Brazilian e-commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) — 9 related CSVs, ~1.4M rows — built with PySpark on a Google Cloud Dataproc cluster using a bronze / silver / gold layout on HDFS and Hive.
 
-> **Status: in progress.** Ingestion through integration are done — seven gold tables are built. Optimization and the serving layer are next; see [Progress](#progress).
+> **Status:** ingestion through optimization are done, with partitioned Parquet and CSV exports on GCS. A BigQuery + Looker Studio dashboard is the remaining piece; see [Progress](#progress).
 
 ## Architecture
 
@@ -49,7 +49,7 @@ erDiagram
 | `02_exploration` | `bronze_*` | Null and duplicate profiling, business EDA, delivery-time analysis | nothing |
 | `03_cleaning` | `bronze_*` | Null handling, type fixes, outlier trimming, geolocation collapse, feature engineering | `silver_*` |
 | `04_integration` | `silver_*` | Pre-aggregates payments and reviews, joins all 8 datasets, aggregations, window functions, enrichment | `gold_*` |
-| `05_optimization_serving` | `gold_*` | Executor tuning, join-strategy benchmarks, bucketing, export | Parquet / GCS |
+| `05_optimization_serving` | `silver_*`, `gold_*` | Executor tuning, join-strategy benchmarks, bucketing, skew, caching, export | partitioned Parquet + CSV on GCS |
 
 ## Data quality findings
 
@@ -70,6 +70,8 @@ Every one of these produces **wrong numbers without raising an error** — the d
 ## Key decisions
 
 **Dataproc image pinned to 2.2, not the 2.3 default.** Image 2.3 auto-loads a BigLake catalog extension that intercepts every catalog operation and fails unless the Lakehouse API is enabled. It cannot be turned off from the notebook — setting `spark.sql.extensions` on `SparkSession.builder` has no effect because the extension binds at cluster level.
+
+**Dynamic allocation off for the benchmarks.** Dataproc turns it on by default, which lets Spark hand executors back while idle and request them again on the next job. Every first run would then include executor start-up time.
 
 **Fixed 2 workers rather than autoscaling.** Notebook 05 measures join strategies against each other; a cluster that resizes mid-run makes those numbers meaningless. Dataproc's secondary workers are also preemptible by default and can vanish during a job.
 
@@ -95,6 +97,21 @@ Every one of these produces **wrong numbers without raising an error** — the d
 
 `full_orders` matching the 110,337 items exactly is the check that the join fan-out is gone. The two customer tables agreeing at 93,642 confirms both group on the person rather than the order.
 
+## Performance
+
+![Join strategy benchmark](docs/img/join_benchmark.png)
+
+| What was measured | Result |
+|---|---|
+| Join strategy, 20M rows | broadcast **8.4×** faster than sort-merge (0.60 s vs 5.02 s) |
+| Join strategy, real 110k rows | no meaningful difference — all within run-to-run noise |
+| Bucketing `orders` ⋈ `order_items` | both `Exchange` nodes removed from the plan; 0.55 s → 0.40 s |
+| Salting a 254× skewed key | no gain (0.48 s vs 0.52 s) — AQE has nothing to split below 256 MB |
+| Caching `gold_full_orders` | 15% faster; 23.3 MiB, fully in memory |
+| Partition pruning on GCS | one month read out of 24 (8,064 of 110,337 rows) |
+
+Half of these are results where the optimisation *didn't* help, and the reason why is the useful part. Methodology, every run, and the physical plans behind each number are in [`docs/benchmarks.md`](docs/benchmarks.md). The tuning profile itself, with the reasoning for each value, is [`config/spark_tuning.py`](config/spark_tuning.py).
+
 ## Reproducing
 
 ```bash
@@ -111,11 +128,15 @@ bash infra/load_data.sh
 
 Each notebook is self-contained: it builds its own `SparkSession` and reads its inputs from Hive, so any stage can be re-run on its own as long as the previous layer exists. Nothing is passed between notebooks in memory.
 
+Open notebooks with the **Python 3** kernel, not PySpark. The PySpark kernel starts its own session before the first cell runs, `getOrCreate()` returns it, and every executor setting is silently ignored — including the HDFS warehouse path, which then fails on the first `CREATE DATABASE`. Each notebook asserts its app name to catch this.
+
 Run one notebook at a time — the cluster has 8 vCPU total, and a second live `SparkSession` will sit waiting for resources that the first one holds.
 
 ## Cost
 
-About **$0.46/hour** while running, on a $300 free-trial credit. The cluster is set to stop (not delete) after 2 hours idle; stopped, it costs roughly $0.32/day for the disks. Total spend for the project is expected to stay under $15.
+About **$0.45/hour** while running, on a $300 free-trial credit. The cluster deletes itself after 2 hours idle (`--max-idle=2h`), so nothing is billed between sessions; notebook 05 restores the silver and gold tables from GCS in about a minute on a fresh cluster.
+
+An earlier version stopped the cluster instead of deleting it. A stopped cluster is pinned to its zone and machine type, and when that zone ran out of `n4d` capacity the cluster could not start for several days. Deleting and recreating avoids that lock-in. One open Jupyter kernel keeps the cluster from ever counting as idle — shut all kernels down at the end of a session.
 
 ## Layout
 
@@ -127,8 +148,14 @@ notebooks/
   01_ingestion.ipynb
   02_exploration.ipynb
   03_cleaning.ipynb
+  04_integration.ipynb
+  05_optimization_serving.ipynb
+config/
+  spark_tuning.py       executor sizing, AQE, shuffle partitions + build_session()
 docs/
   data_dictionary.md    every table and column, including derived fields
+  benchmarks.md         every timing, run by run, with the plans behind them
+  img/                  benchmark chart, Spark UI screenshot
 ```
 
 ## Stack
@@ -143,7 +170,9 @@ PySpark 3.5 · Hadoop 3.3 (HDFS, YARN) · Hive metastore · Parquet · Google Cl
 - [x] Null and duplicate profiling, business EDA, delivery-time distribution
 - [x] Cleaning: nulls, types, outliers, geolocation collapse, feature engineering
 - [x] Integration: 8-way join, aggregations, window functions, enrichment
-- [ ] Optimization: executor tuning, join benchmarks, bucketing
-- [ ] Serving: partitioned Parquet, BigQuery load, Looker Studio dashboard
+- [x] Optimization: executor tuning, join benchmarks, bucketing, skew, caching
+- [x] Serving: partitioned Parquet and CSV exports on GCS
+- [ ] Serving: BigQuery load, Looker Studio dashboard
 - [x] Docs: data dictionary and ERD
-- [ ] Docs: benchmark results, dashboard screenshot
+- [x] Docs: benchmark results
+- [ ] Docs: dashboard screenshot
