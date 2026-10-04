@@ -12,14 +12,15 @@ gcloud dataproc clusters create olist-cluster \
   --project="$PROJECT" \
   --region="$REGION" \
   --image-version=2.2-debian12 \
-  --master-machine-type=n4d-standard-4 \
-  --master-boot-disk-type=hyperdisk-balanced --master-boot-disk-size=32 \
+  --master-machine-type=e2-standard-4 \
+  --master-boot-disk-type=pd-balanced --master-boot-disk-size=32 \
   --num-workers=2 \
-  --worker-machine-type=n4d-standard-4 \
-  --worker-boot-disk-type=hyperdisk-balanced --worker-boot-disk-size=32 \
+  --worker-machine-type=e2-standard-4 \
+  --worker-boot-disk-type=pd-balanced --worker-boot-disk-size=32 \
   --optional-components=JUPYTER \
   --enable-component-gateway \
   --bucket="$BUCKET" \
+  --max-idle=2h \
   --scopes=https://www.googleapis.com/auth/cloud-platform
 
 # Notes on the choices above:
@@ -30,6 +31,21 @@ gcloud dataproc clusters create olist-cluster \
 #   unless the Lakehouse API is enabled. It cannot be disabled from the notebook —
 #   spark.sql.extensions set on SparkSession.builder has no effect because the
 #   extension is bound at cluster level.
+#
+# e2-standard-4, no --zone
+#   The first cluster ran on n4d-standard-4 and was stopped between sessions. A
+#   stopped cluster is pinned to its zone and machine type, and us-central1-b ran
+#   out of n4d capacity (ZONE_RESOURCE_POOL_EXHAUSTED) for several days, so it
+#   could not start again. E2 is the most widely available family, and leaving
+#   out --zone lets Dataproc place the cluster in any zone with capacity. Same
+#   4 vCPU / 16 GB per node, so the Spark config is unchanged.
+#
+# --max-idle=2h (deletes, does not stop)
+#   Every layer is mirrored to GCS, so nothing is lost when the cluster goes.
+#   Deleting avoids both the disk charges of a stopped cluster and the zone
+#   lock-in above. Notebook 05 has a cell that restores silver/gold from GCS.
+#   Shut down all Jupyter kernels when finished — an open kernel holds a Spark
+#   session, the cluster never counts as idle, and the timer never fires.
 #
 # --num-workers=2 (fixed, no autoscaling)
 #   Autoscaling would resize the cluster mid-run and invalidate the join
@@ -52,7 +68,3 @@ gcloud dataproc clusters create olist-cluster \
 #   gcloud projects add-iam-policy-binding "$PROJECT" \
 #     --member="serviceAccount:${PROJNUM}-compute@developer.gserviceaccount.com" \
 #     --role="roles/dataproc.worker"
-#
-# Idle policy: gcloud only offers --max-idle, which DELETES the cluster. To have
-# it STOP instead (keeping HDFS and the Hive metastore), set it in the Console:
-# Cluster details -> Cost control -> 2 hours / Becoming idle / Stop.
